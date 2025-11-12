@@ -1,0 +1,107 @@
+# =================================================================
+# Python Artifacts
+# =================================================================
+# File bytecode atau file yang dioptimalkan
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ekstensi C
+*.so
+
+# Distribusi / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+
+# =================================================================
+# Lingkungan Virtual (Virtual Environments)
+# =================================================================
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak
+venv.bak
+
+
+# =================================================================
+# Laporan Pengujian & Cakupan (Test & Coverage Reports)
+# =================================================================
+.pytest_cache/
+.tox/
+.nox/
+htmlcov/
+.coverage
+.coverage.*
+nosetests.xml
+coverage.xml
+*.cover
+
+
+# =================================================================
+# Cache Linter & Formatter
+# =================================================================
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+
+# =================================================================
+# Konfigurasi IDE & Editor
+# =================================================================
+# Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.history/
+
+# PyCharm
+.idea/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+
+# =================================================================
+# File Spesifik Sistem Operasi (OS-specific files)
+# =================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+
+# =================================================================
+# File Log & Lainnya
+# =================================================================
+*.log
+*.db
+*.sqlite3
