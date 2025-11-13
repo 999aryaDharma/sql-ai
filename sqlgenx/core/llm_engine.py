@@ -1,86 +1,75 @@
-"""LLM engine using LangChain and Google Gemini."""
-from typing import List, Dict, Any
+"""Enhanced LLM engine with natural language schema and auto-fix capabilities."""
+from typing import List, Dict, Any, Optional, Tuple
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, SystemMessage
+import hashlib
+from dataclasses import dataclass
 from rich.markdown import Markdown
 
 
-class LLMEngine:
-    """Manages LLM interactions for SQL generation."""
+@dataclass
+class GenerationAttempt:
+    """Track SQL generation attempts for circuit breaker."""
+    sql: str
+    error: Optional[str]
+    error_hash: str
+    attempt_number: int
+
+
+class LLMEngineEnhanced:
+    """Enhanced LLM engine with natural language schema formatting and auto-fix."""
+    
+    MAX_RETRY_ATTEMPTS = 2  # Circuit breaker limit
     
     def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
-        """Initialize LLM engine with Gemini."""
+        """Initialize enhanced LLM engine."""
         self.llm = ChatGoogleGenerativeAI(
             model=model,
             google_api_key=api_key,
-            temperature=0.1,  # Low temperature for more deterministic SQL
-            max_tokens=10000
+            temperature=0.1,
+            max_tokens=2048
         )
         
-        self.system_prompt = """You are an expert SQL engineer.
-You are given a database schema and must generate syntactically correct SQL queries.
+        self.system_prompt = """You are an expert SQL engineer with deep understanding of database schemas and relationships.
 
 CRITICAL RULES:
-1. Only use tables and columns that exist in the provided schema context
-2. Return ONLY the SQL query, nothing else - no explanations, no markdown, no code blocks
-3. Use proper SQL syntax for the database type specified
-4. Include appropriate JOINs when querying multiple tables
-5. Use meaningful aliases for better readability
+1. Only use tables and columns that exist in the provided schema
+2. Return ONLY the SQL query - no explanations, no markdown, no code blocks
+3. Use proper SQL syntax for the specified database type
+4. Follow the relationship hints to construct proper JOINs
+5. Use meaningful table aliases for readability
 6. For aggregations, always include GROUP BY when needed
-7. Pay close attention to sample values provided in comments (e.g., `status ('Sample values: 'completed', 'pending')`) to correctly filter data.
-8. If a step-by-step plan is provided, follow it to construct the query, using CTEs (Common Table Expressions) for multi-step logic.
-9. Use LIMIT for queries that might return many rows
+7. Use LIMIT for queries that might return many rows
+
+When you see relationship hints like "customers are related to products through orders",
+this means you need to JOIN: customers → orders → products
+
+Schema Context (in natural language):
+{schema_context}
+
+Database Type: {dbms_type}
+
+Generate a SQL query for the following request:"""
+        
+        self.fix_prompt = """The previous SQL query failed with an error.
+
+Original Query:
+{failed_sql}
+
+Error Message:
+{error_message}
 
 Schema Context:
 {schema_context}
 
-Generate a SQL query for the following request:"""
-    
-    def generate_sql(
-        self, 
-        user_query: str, 
-        plan: str,
-        schema_context: List[Dict[str, Any]],
-        dbms_type: str = "generic"
-    ) -> str:
-        """Generate SQL query from natural language."""
-        
-        # Format schema context
-        context_text = self._format_schema_context(schema_context)
-        
-        # Create prompt
-        system_msg = self.system_prompt.format(schema_context=context_text)
-        
-        # Add DBMS-specific instructions
-        if dbms_type.lower() == "postgresql":
-            system_msg += "\n\nUse PostgreSQL syntax (e.g., use double quotes for identifiers if needed)."
-        elif dbms_type.lower() == "mysql":
-            system_msg += "\n\nUse MySQL syntax (e.g., backticks for identifiers if needed)."
-        elif dbms_type.lower() == "sqlite":
-            system_msg += "\n\nUse SQLite syntax."
-        
-        # Construct final prompt with plan and a firm reminder
-        final_user_prompt = f"""User Request: {user_query}
+Please fix the SQL query. Consider:
+1. Check if all table and column names exist in the schema
+2. Verify JOIN conditions are correct
+3. Ensure proper syntax for the database type: {dbms_type}
+4. Check for missing GROUP BY clauses with aggregations
 
-Execution Plan:
-{plan}
+Return ONLY the corrected SQL query, nothing else."""
 
-CRITICAL REMINDER: Based on the plan above, provide ONLY the final, complete SQL query. Do not add any explanation or markdown."""
-
-        messages = [
-            SystemMessage(content=system_msg),
-            HumanMessage(content=final_user_prompt)
-        ]
-        
-        # Generate response
-        response = self.llm.invoke(messages)
-        
-        # Extract SQL from response
-        sql = self._extract_sql(response.content)
-        
-        return sql
-    
     def _format_schema_context(self, contexts: List[Dict[str, Any]]) -> str:
         """Format retrieved schema contexts for prompt."""
         if not contexts:
@@ -94,56 +83,6 @@ CRITICAL REMINDER: Based on the plan above, provide ONLY the final, complete SQL
         
         return "\n\n".join(formatted)
     
-    def _extract_sql(self, response: str) -> str:
-        """Extract SQL query from LLM response."""
-        # Remove markdown code blocks if present
-        sql = response.strip()
-        
-        # Remove ```sql and ``` markers
-        if sql.startswith("```sql"):
-            sql = sql[6:]
-        elif sql.startswith("```"):
-            sql = sql[3:]
-        
-        if sql.endswith("```"):
-            sql = sql[:-3]
-        
-        sql = sql.strip()
-        
-        # Remove any explanatory text before or after the SQL
-        # Look for common SQL keywords at the start
-        sql_keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "CREATE", "ALTER", "DROP"]
-        lines = sql.split("\n")
-        
-        # Find first line with SQL keyword
-        start_idx = 0
-        for i, line in enumerate(lines):
-            if any(line.strip().upper().startswith(kw) for kw in sql_keywords):
-                start_idx = i
-                break
-        
-        # Find last line with semicolon or SQL content
-        end_idx = len(lines)
-        for i in range(len(lines) - 1, -1, -1):
-            line = lines[i].strip()
-            if line and (line.endswith(";") or any(c.isalnum() for c in line)):
-                end_idx = i + 1
-                break
-        
-        sql = "\n".join(lines[start_idx:end_idx]).strip()
-        
-        return sql
-    
-    def explain_query(self, sql_query: str) -> str:
-        """Generate explanation for a SQL query."""
-        messages = [
-            SystemMessage(content="You are a SQL expert. Explain the following SQL query in simple terms."),
-            HumanMessage(content=f"Jelaskan SQL query ini dengan bahasa indonesia:\n\n{sql_query}")
-        ]
-        
-        response = self.llm.invoke(messages)
-        return response.content
-    
     def explain_query_as_markdown(self, sql_query: str) -> Markdown:
         """Generate explanation for a SQL query and return as a Rich Markdown object."""
         explanation_text = self.explain_query(sql_query)
@@ -153,40 +92,134 @@ CRITICAL REMINDER: Based on the plan above, provide ONLY the final, complete SQL
             explanation_text = explanation_text.split("Let's break it down step-by-step:", 1)[1].strip()
             
         return Markdown(explanation_text, style="info")
-
-    def validate_user_query(self, user_query: str, table_names: List[str]) -> (bool, str):
+    
+    def generate_sql(
+        self,
+        user_query: str,
+        schema_context: str,  # Natural language formatted schema
+        dbms_type: str = "generic",
+        auto_fix: bool = False,
+        validator = None
+    ) -> Tuple[str, List[GenerationAttempt]]:
+        """Generate SQL with optional auto-fix and circuit breaker."""
+        
+        attempts = []
+        
+        # First attempt
+        sql = self._generate_attempt(user_query, schema_context, dbms_type)
+        
+        # Validate if validator provided
+        if validator:
+            validation = validator.validate(sql)
+            
+            if validation.is_valid:
+                attempts.append(GenerationAttempt(
+                    sql=sql,
+                    error=None,
+                    error_hash="",
+                    attempt_number=1
+                ))
+                return sql, attempts
+            
+            # Track failed attempt
+            error_msg = "; ".join(validation.errors)
+            error_hash = self._hash_error(error_msg)
+            
+            attempts.append(GenerationAttempt(
+                sql=sql,
+                error=error_msg,
+                error_hash=error_hash,
+                attempt_number=1
+            ))
+            
+            # Auto-fix if enabled
+            if auto_fix:
+                return self._auto_fix_with_circuit_breaker(
+                    user_query=user_query,
+                    schema_context=schema_context,
+                    dbms_type=dbms_type,
+                    failed_sql=sql,
+                    error_msg=error_msg,
+                    error_hash=error_hash,
+                    attempts=attempts,
+                    validator=validator
+                )
+        
+        # No validator or no auto-fix
+        attempts.append(GenerationAttempt(
+            sql=sql,
+            error=None,
+            error_hash="",
+            attempt_number=1
+        ))
+        
+        return sql, attempts
+    
+    def validate_user_query(self, user_query: str, table_names: List[str], schema_context: str = "") -> (bool, str):
         """
         Validates if the user query is relevant to the database schema.
         Returns a tuple of (is_valid, reason).
         """
-        prompt = f"""
-        You are a database analyst. Your task is to determine if a user's question is answerable given a list of table names.
-        The user's question does not need to mention table names directly, but it should be conceptually related to them.
+        if schema_context:
+            # Use detailed schema context for more accurate validation
+            prompt = f"""
+            You are a database analyst. Your task is to determine if a user's question is answerable given detailed schema information.
+            The user's question does not need to mention column names directly, but it should be conceptually related to the available data.
 
-        Available tables: {', '.join(table_names)}
+            Schema Information:
+            {schema_context}
 
-        User query: "{user_query}"
+            User query: "{user_query}"
 
-        Is this query relevant and likely answerable using the tables provided?
-        Respond with only "VALID" or "INVALID: [brief reason]".
+            Is this query relevant and likely answerable using the schema provided?
+            Respond with only "VALID" or "INVALID: [detailed reason with specific column references]".
 
-        Example 1:
-        Tables: customers, orders, products
-        User query: "show me top selling products"
-        Response: VALID
+            Example 1:
+            Schema: Table 'products' has columns: 'id', 'name', 'price', 'cost'; Table 'orders' has columns: 'id', 'product_id', 'quantity'
+            User query: "show me top selling products" 
+            Response: VALID
 
-        Example 2:
-        Tables: employees, departments, salaries
-        User query: "what is the weather tomorrow?"
-        Response: INVALID: The query is about weather, which is unrelated to employees and departments.
-        """
+            Example 2:
+            Schema: Table 'products' has columns: 'id', 'name', 'selling_price', 'purchase_price'
+            User query: "calculate profit margin for each product"
+            Response: VALID
+
+            Example 3:
+            Schema: Table 'products' has columns: 'id', 'name', 'selling_price' but no cost-related columns
+            User query: "calculate profit margin" 
+            Response: INVALID: The schema provides selling price information but does not contain explicit cost price information needed to calculate profit margin. Profit margin requires both selling price and cost price.
+            """
+        else:
+            # Fallback to basic table names validation
+            prompt = f"""
+            You are a database analyst. Your task is to determine if a user's question is answerable given a list of table names.
+            The user's question does not need to mention table names directly, but it should be conceptually related to them.
+
+            Available tables: {', '.join(table_names)}
+
+            User query: "{user_query}"
+
+            Is this query relevant and likely answerable using the tables provided?
+            Respond with only "VALID" or "INVALID: [brief reason]".
+
+            Example 1:
+            Tables: customers, orders, products
+            User query: "show me top selling products"
+            Response: VALID
+
+            Example 2:
+            Tables: employees, departments, salaries
+            User query: "what is the weather tomorrow?"
+            Response: INVALID: The query is about weather, which is unrelated to employees and departments.
+            """
+        
         response = self.llm.invoke(prompt).content.strip()
         if response.upper() == "VALID":
             return True, ""
         else:
             reason = response.split(":", 1)[1].strip() if ":" in response else "The query seems unrelated to the database schema."
             return False, reason
-
+        
     def suggest_optimizations(self, sql_query: str, dbms_type: str) -> str:
         """Suggests optimizations for a given SQL query."""
         prompt = f"""You are an expert DBA specializing in {dbms_type}.
@@ -248,3 +281,178 @@ CRITICAL REMINDER: Based on the plan above, provide ONLY the final, complete SQL
         """
         response = self.llm.invoke(prompt).content
         return response
+
+    
+    def _generate_attempt(
+        self,
+        user_query: str,
+        schema_context: str,
+        dbms_type: str
+    ) -> str:
+        """Single SQL generation attempt."""
+        
+        system_msg = self.system_prompt.format(
+            schema_context=schema_context,
+            dbms_type=dbms_type
+        )
+        
+        messages = [
+            SystemMessage(content=system_msg),
+            HumanMessage(content=user_query)
+        ]
+        
+        response = self.llm.invoke(messages)
+        sql = self._extract_sql(response.content)
+        
+        return sql
+    
+    def _auto_fix_with_circuit_breaker(
+        self,
+        user_query: str,
+        schema_context: str,
+        dbms_type: str,
+        failed_sql: str,
+        error_msg: str,
+        error_hash: str,
+        attempts: List[GenerationAttempt],
+        validator
+    ) -> Tuple[str, List[GenerationAttempt]]:
+        """Attempt to fix SQL with circuit breaker to prevent infinite loops."""
+        
+        seen_errors = {error_hash}
+        attempt_num = 2
+        
+        while attempt_num <= self.MAX_RETRY_ATTEMPTS:
+            # Generate fix
+            fixed_sql = self._generate_fix(
+                failed_sql=failed_sql,
+                error_message=error_msg,
+                schema_context=schema_context,
+                dbms_type=dbms_type
+            )
+            
+            # Validate fix
+            validation = validator.validate(fixed_sql)
+            
+            if validation.is_valid:
+                # Success!
+                attempts.append(GenerationAttempt(
+                    sql=fixed_sql,
+                    error=None,
+                    error_hash="",
+                    attempt_number=attempt_num
+                ))
+                return fixed_sql, attempts
+            
+            # Still failing
+            new_error_msg = "; ".join(validation.errors)
+            new_error_hash = self._hash_error(new_error_msg)
+            
+            attempts.append(GenerationAttempt(
+                sql=fixed_sql,
+                error=new_error_msg,
+                error_hash=new_error_hash,
+                attempt_number=attempt_num
+            ))
+            
+            # Circuit breaker: same error hash = stuck in loop
+            if new_error_hash in seen_errors:
+                break
+            
+            seen_errors.add(new_error_hash)
+            failed_sql = fixed_sql
+            error_msg = new_error_msg
+            error_hash = new_error_hash
+            attempt_num += 1
+        
+        # All attempts failed, return last attempt
+        return attempts[-1].sql, attempts
+    
+    def _generate_fix(
+        self,
+        failed_sql: str,
+        error_message: str,
+        schema_context: str,
+        dbms_type: str
+    ) -> str:
+        """Generate fixed SQL based on error."""
+        
+        prompt = self.fix_prompt.format(
+            failed_sql=failed_sql,
+            error_message=error_message,
+            schema_context=schema_context,
+            dbms_type=dbms_type
+        )
+        
+        messages = [
+            SystemMessage(content="You are an expert SQL debugger."),
+            HumanMessage(content=prompt)
+        ]
+        
+        response = self.llm.invoke(messages)
+        return self._extract_sql(response.content)
+    
+    def _extract_sql(self, response: str) -> str:
+        """Extract SQL query from LLM response."""
+        sql = response.strip()
+        
+        # Remove markdown code blocks
+        if sql.startswith("```sql"):
+            sql = sql[6:]
+        elif sql.startswith("```"):
+            sql = sql[3:]
+        
+        if sql.endswith("```"):
+            sql = sql[:-3]
+        
+        sql = sql.strip()
+        
+        # Remove any explanatory text before or after SQL
+        sql_keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "CREATE", "ALTER", "DROP"]
+        lines = sql.split("\n")
+        
+        # Find first line with SQL keyword
+        start_idx = 0
+        for i, line in enumerate(lines):
+            if any(line.strip().upper().startswith(kw) for kw in sql_keywords):
+                start_idx = i
+                break
+        
+        # Find last line with semicolon or SQL content
+        end_idx = len(lines)
+        for i in range(len(lines) - 1, -1, -1):
+            line = lines[i].strip()
+            if line and (line.endswith(";") or any(c.isalnum() for c in line)):
+                end_idx = i + 1
+                break
+        
+        sql = "\n".join(lines[start_idx:end_idx]).strip()
+        
+        return sql
+    
+    def _hash_error(self, error_msg: str) -> str:
+        """Create hash of error message for circuit breaker."""
+        return hashlib.md5(error_msg.encode()).hexdigest()[:8]
+    
+    def explain_query(self, sql_query: str, schema_context: str = "") -> str:
+        """Generate explanation for a SQL query."""
+        
+        prompt = f"""Explain this SQL query in simple terms:
+
+{sql_query}
+
+{f'Schema context: {schema_context}' if schema_context else ''}
+
+Provide a clear explanation covering:
+1. What data is being retrieved
+2. Which tables are involved and how they're joined
+3. Any filtering or aggregation logic
+4. The expected result structure"""
+        
+        messages = [
+            SystemMessage(content="You are a SQL educator who explains queries clearly."),
+            HumanMessage(content=prompt)
+        ]
+        
+        response = self.llm.invoke(messages)
+        return response.content

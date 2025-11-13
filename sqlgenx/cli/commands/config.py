@@ -21,7 +21,7 @@ def config_cmd(key: Optional[str], value: Optional[str], show: bool) -> None:
     if show:
         # Show current configuration
         console.print()
-        table = Table(title="SQLGenX Configuration", show_header=True, header_style="bold magenta")
+        table = Table(title="SQLGenX Configuration", show_header=True, header_style="bold violet")
         table.add_column("Setting", style="cyan", width=25)
         table.add_column("Value", style="green")
         

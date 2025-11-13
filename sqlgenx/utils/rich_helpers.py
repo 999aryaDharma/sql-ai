@@ -43,7 +43,7 @@ def print_workspaces(workspaces: List, current: str) -> None:
         print_info("No workspaces found")
         return
     
-    table = Table(title="Available Workspaces", show_header=True, header_style="bold magenta")
+    table = Table(title="Available Workspaces", show_header=True, header_style="bold violet")
     
     table.add_column("Active", style="green", width=6)
     table.add_column("Name", style="cyan")

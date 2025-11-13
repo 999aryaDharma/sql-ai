@@ -4,7 +4,7 @@ from pathlib import Path
 from langgraph.graph import StateGraph, END
 from .schema_loader import SchemaLoader, SchemaInfo
 from .vector_store import VectorStore
-from .llm_engine import LLMEngine
+from .llm_engine import LLMEngineEnhanced as LLMEngine
 from .validator import SQLValidator, ValidationResult
 
 
@@ -75,15 +75,28 @@ class SQLGenerationGraph:
         schema_file = workspace_dir / "schema.sql"
         
         if not schema_file.exists():
-            state["errors"].append("Schema file not found")
+            state["errors"].append("Schema file not found in workspace")
             return state
         
         try:
-            loader = SchemaLoader(dialect=state.get("dbms_type", ""))
+            # Determine dialect
+            dialect = state.get("dbms_type", "")
+            if dialect == "generic":
+                dialect = ""
+            
+            loader = SchemaLoader(dialect=dialect)
             schema_info = loader.load_from_file(schema_file)
+            
+            # Verify schema has tables
+            if not schema_info or not schema_info.tables:
+                state["errors"].append("No tables found in schema")
+                return state
+            
             state["schema_info"] = schema_info
         except Exception as e:
             state["errors"].append(f"Failed to load schema: {str(e)}")
+            import traceback
+            print(f"DEBUG - Schema load error: {traceback.format_exc()}")
         
         return state
     
@@ -94,8 +107,25 @@ class SQLGenerationGraph:
         
         try:
             llm_engine = LLMEngine(self.api_key)
+            # Create more detailed schema context including table and column names
+            detailed_schema_context = []
+            for table in state["schema_info"].tables:
+                table_info = f"Table '{table.name}' has columns: "
+                column_info = ", ".join([f"'{col.name}' ({col.data_type})" for col in table.columns])
+                table_info += column_info
+                detailed_schema_context.append(table_info)
+                
+            schema_context_str = " | ".join(detailed_schema_context)
+            
+            # Get table names as fallback
             table_names = [t.name for t in state["schema_info"].tables]
-            is_valid, reason = llm_engine.validate_user_query(state["user_query"], table_names)
+            
+            # Use the detailed schema context for validation
+            is_valid, reason = llm_engine.validate_user_query(
+                state["user_query"], 
+                table_names, 
+                schema_context_str
+            )
             
             if not is_valid:
                 state["errors"].append(f"Query validation failed: {reason}")
@@ -147,7 +177,7 @@ class SQLGenerationGraph:
         
         try:
             llm_engine = LLMEngine(self.api_key)
-            sql = llm_engine.generate_sql(
+            sql, attempts = llm_engine.generate_sql(
                 state["user_query"],
                 state["plan"],
                 state["retrieved_contexts"],
@@ -171,7 +201,7 @@ class SQLGenerationGraph:
             
             if validation.is_valid:
                 # Format the SQL for better readability
-                state["final_sql"] = validator.format_sql(state["generated_sql"])
+                formatted_sql = validator.format_sql(state["generated_sql"])
                 
                 # Check schema compatibility
                 if state["schema_info"]:
@@ -185,6 +215,22 @@ class SQLGenerationGraph:
                         state["errors"].append(
                             f"Query uses tables not in schema: {', '.join(missing)}"
                         )
+                    else:
+                        # If compatible, normalize table names to match actual table names in database
+                        # Create mapping from lowercase to actual case
+                        table_case_map = {t.lower(): t for t in available_tables}
+                        
+                        # Replace table names in the SQL to match actual database case
+                        import re
+                        sql_to_use = formatted_sql
+                        for lower_name, actual_name in table_case_map.items():
+                            # Replace table names while being careful not to replace partial matches
+                            pattern = r'\b(' + re.escape(lower_name) + r')\b'
+                            sql_to_use = re.sub(pattern, actual_name, sql_to_use, flags=re.IGNORECASE)
+                        
+                        formatted_sql = sql_to_use
+
+                state["final_sql"] = formatted_sql
             else:
                 state["errors"].extend(validation.errors)
         

@@ -3,8 +3,6 @@ from typing import Optional
 import typer
 import sys
 import os
-from rich.markdown import Markdown
-
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -14,6 +12,7 @@ from sqlgenx.utils.rich_helpers import (
     print_success, print_error, print_warning, print_info, print_sql, 
     console, print_context_info
 )
+from sqlgenx.utils.helpers import normalize_dialect
 from sqlgenx.core.graph import SQLGenerationGraph
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.panel import Panel
@@ -23,7 +22,10 @@ def generate_sql(
     query: str,
     workspace: Optional[str],
     explain: bool,
-    copy: bool
+    copy: bool,
+    run: bool = False,
+    limit: Optional[int] = None,
+    analyze: bool = False
 ) -> None:
     """Generate SQL from natural language query."""
     
@@ -73,6 +75,16 @@ def generate_sql(
         task = progress.add_task("🤖 Analyzing query...", total=None)
         
         try:
+            # Check if schema file exists
+            schema_file = workspace_dir / "schema.sql"
+            if not schema_file.exists():
+                progress.stop()
+                console.print()
+                print_error("Schema file not found in workspace")
+                print_info("This workspace may need to be resynced")
+                print_info("Try: sqlgenx sync or reconnect with: sqlgenx connect")
+                raise typer.Exit(1)
+            
             graph = SQLGenerationGraph(api_key)
             
             progress.update(task, description="🔍 Retrieving schema context...")
@@ -80,7 +92,7 @@ def generate_sql(
             result = graph.run(
                 workspace_dir=workspace_dir,
                 user_query=query,
-                dbms_type=meta.dbms_type
+                dbms_type=normalize_dialect(meta.dbms_type)
             )
             
             progress.update(task, description="✓ SQL generated successfully")
@@ -89,6 +101,8 @@ def generate_sql(
             progress.stop()
             console.print()
             print_error(f"Failed to generate SQL: {str(e)}")
+            import traceback
+            print_info(f"Error details: {traceback.format_exc()}")
             print_info("Check your API key and internet connection")
             raise typer.Exit(1)
     
@@ -136,7 +150,7 @@ def generate_sql(
             task = progress.add_task("Generating explanation...", total=None)
             try:
                 llm = LLMEngine(api_key)
-                explanation = llm.explain_query_as_markdown(final_sql)
+                explanation = llm.explain_query(final_sql)
                 progress.update(task, description="✓ Explanation ready")
             except Exception as e:
                 progress.stop()
@@ -145,7 +159,7 @@ def generate_sql(
         
         if explanation:
             console.print()
-            panel = Panel(explanation, title="📖 Query Explanation", border_style="cyan2")
+            panel = Panel(explanation, title="📖 Query Explanation", border_style="blue")
             console.print(panel)
     
     # Copy to clipboard if requested
@@ -161,4 +175,112 @@ def generate_sql(
             print_info("Install with: pip install pyperclip")
         except Exception as e:
             console.print()
-            print_warning(f"Failed to copy to clipboard: {str(e)}") 
+            print_warning(f"Failed to copy to clipboard: {str(e)}")
+    
+    # Execute query if requested
+    if run:
+        console.print()
+        console.print("[bold yellow]⚡ Executing query...[/bold yellow]")
+        
+        # Check if connection exists
+        from sqlgenx.core.db_connector import ConnectionManager, DatabaseConnection
+        
+        conn_manager = ConnectionManager(workspace_dir)
+        connections = conn_manager.list_connections()
+        
+        if not connections:
+            console.print()
+            print_error("No database connection found in workspace")
+            print_info("Connect to a database first:")
+            console.print("  [cyan]sqlgenx connect[/cyan]")
+            raise typer.Exit(1)
+        
+        # Use first connection (or could ask user to choose)
+        conn_info = connections[0]
+        connection_string = conn_info.get("connection_string")
+        
+        try:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console
+            ) as progress:
+                task = progress.add_task("Executing query...", total=None)
+                
+                db = DatabaseConnection(connection_string)
+                df, exec_metadata = db.execute_query(final_sql, limit=limit)
+                
+                progress.update(task, description="✓ Query executed")
+                db.close()
+            
+            console.print()
+            print_success(f"Query executed successfully! Retrieved {len(df)} rows")
+            
+            # Display results
+            from rich.table import Table as RichTable
+            
+            console.print()
+            results_table = RichTable(
+                title="Query Results",
+                show_header=True,
+                header_style="bold violet"
+            )
+            
+            # Add columns
+            for col in df.columns:
+                results_table.add_column(str(col), style="cyan")
+            
+            # Add rows (limit display to 50 rows)
+            display_limit = min(50, len(df))
+            for idx in range(display_limit):
+                row = df.iloc[idx]
+                results_table.add_row(*[str(val) for val in row])
+            
+            console.print(results_table)
+            
+            if len(df) > display_limit:
+                console.print(f"\n[dim]... showing {display_limit} of {len(df)} rows[/dim]")
+            
+            # Analyze results if requested
+            if analyze:
+                console.print()
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console
+                ) as progress:
+                    task = progress.add_task("🧠 Analyzing results with AI...", total=None)
+                    
+                    from sqlgenx.core.data_analyzer import DataAnalyzerEnhanced as DataAnalyzer
+                    analyzer = DataAnalyzer(api_key)
+                    result = analyzer.analyze_results(
+                        df=df,
+                        original_query=query,
+                        sql_query=final_sql,
+                        metadata=exec_metadata
+                    )
+                    
+                    # The function returns a tuple of (analysis_text, metadata_dict)
+                    if isinstance(result, tuple):
+                        insights, analysis_metadata = result
+                    else:
+                        insights = result
+                    
+                    progress.update(task, description="✓ Analysis complete")
+                
+                console.print()
+                from rich.markdown import Markdown
+                from rich.panel import Panel
+                md = Markdown(insights)
+                panel = Panel(
+                    md,
+                    title="🎯 AI Insights & Analysis",
+                    border_style="green",
+                    padding=(1, 2)
+                )
+                console.print(panel)
+        
+        except Exception as e:
+            console.print()
+            print_error(f"Failed to execute query: {str(e)}")
+            print_info("Make sure the connection is valid and the query is correct")

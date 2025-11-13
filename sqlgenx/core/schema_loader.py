@@ -14,16 +14,22 @@ class ColumnInfo(BaseModel):
     primary_key: bool = False
     foreign_key: bool = False
     default: str | None = None
+    
+    class Config:
+        extra = "ignore"  # Ignore extra fields
 
 
 class TableInfo(BaseModel):
     """Information about a database table."""
     name: str
     columns: List[ColumnInfo]
-    primary_keys: List[str]
-    foreign_keys: Dict[str, str]  # column -> referenced_table.column
-    column_samples: Dict[str, str] # column_name -> "Sample values: 'val1', 'val2'"
-    indexes: List[str]
+    primary_keys: List[str] = []
+    foreign_keys: Dict[str, str] = {}  # column -> referenced_table.column
+    indexes: List[str] = []
+    column_samples: List[str] = []  # Optional: sample values for context
+    
+    class Config:
+        extra = "ignore"  # Ignore extra fields
     
     def to_text(self) -> str:
         """Convert table info to text representation for embedding."""
@@ -34,11 +40,11 @@ class TableInfo(BaseModel):
             pk = " PRIMARY KEY" if col.primary_key else ""
             fk = f" REFERENCES {self.foreign_keys.get(col.name, '')}" if col.foreign_key else ""
             nullable = "" if col.nullable else " NOT NULL"
-            sample = f" ({self.column_samples[col.name]})" if col.name in self.column_samples else ""
-            lines.append(f"  - {col.name} ({col.data_type}){pk}{fk}{nullable}{sample}")
+            lines.append(f"  - {col.name} ({col.data_type}){pk}{fk}{nullable}")
         
-        if self.primary_keys:
-            lines.append(f"Primary Key(s): {', '.join(self.primary_keys)}")
+        # Add summary for better vector search matches
+        column_names = [col.name for col in self.columns]
+        lines.append(f"Column names: {', '.join(column_names)}")
         
         if self.indexes:
             lines.append(f"Indexes: {', '.join(self.indexes)}")
@@ -109,38 +115,31 @@ class SchemaLoader:
         columns = []
         primary_keys = []
         foreign_keys = {}
-        column_samples = {}
         indexes = []
         
         # Parse columns
-        for column_def in statement.find_all(exp.ColumnDef):
-            col_info = self._parse_column(column_def)
-            columns.append(col_info)
-            
-            if col_info.primary_key:
-                primary_keys.append(col_info.name)
-            
-            # Check for inline foreign key
-            for constraint in column_def.constraints:
-                if isinstance(constraint, exp.ForeignKey):
-                    ref_table = constraint.reference.this.name if constraint.reference else ""
-                    ref_col = constraint.reference.expressions[0].name if constraint.reference and constraint.reference.expressions else ""
-                    foreign_keys[col_info.name] = f"{ref_table}.{ref_col}"
-                    col_info.foreign_key = True
-            
-            # Check for sample values in comments
-            if column_def.comments:
-                for comment in column_def.comments:
-                    comment_text = comment.strip().lower()
-                    if comment_text.startswith("sample values:"):
-                        column_samples[col_info.name] = comment.strip()
+        if hasattr(statement, 'this') and hasattr(statement.this, 'expressions'):
+            for expr in statement.this.expressions:
+                if isinstance(expr, exp.ColumnDef):
+                    col_info = self._parse_column(expr)
+                    columns.append(col_info)
+                    
+                    if col_info.primary_key:
+                        primary_keys.append(col_info.name)
+                    
+                    # Check for inline foreign key
+                    for constraint in expr.constraints:
+                        if isinstance(constraint, exp.ForeignKey):
+                            ref_table = constraint.reference.this.name if constraint.reference else ""
+                            ref_col = constraint.reference.expressions[0].name if constraint.reference and constraint.reference.expressions else ""
+                            foreign_keys[col_info.name] = f"{ref_table}.{ref_col}"
+                            col_info.foreign_key = True
         
         return TableInfo(
             name=table_name,
             columns=columns,
             primary_keys=primary_keys,
             foreign_keys=foreign_keys,
-            column_samples=column_samples,
             indexes=indexes
         )
     

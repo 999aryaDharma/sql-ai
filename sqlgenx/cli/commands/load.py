@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 from sqlgenx.utils.workspace_manager import WorkspaceManager
 from sqlgenx.utils.rich_helpers import print_success, print_error, print_info, console
+from sqlgenx.utils.helpers import normalize_dialect
 from sqlgenx.core.schema_loader import SchemaLoader
 from sqlgenx.core.vector_store import VectorStore
 from rich.progress import Progress, SpinnerColumn, TextColumn
