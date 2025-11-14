@@ -1,4 +1,8 @@
-"""Main CLI entry point for SQLGenX."""
+"""
+sqlgenx/cli/main.py - UPDATED
+
+Main CLI entry point with semantic enrichment support.
+"""
 import typer
 from pathlib import Path
 from typing import Optional
@@ -24,11 +28,17 @@ def load(
     schema_file: Path = typer.Argument(..., help="Path to SQL schema file"),
     name: str = typer.Option(None, "--name", "-n", help="Workspace name"),
     dbms: str = typer.Option("generic", "--dbms", "-d", help="Database type (mysql, postgresql, sqlite, generic)"),
-    description: str = typer.Option(None, "--desc", help="Workspace description")
+    description: str = typer.Option(None, "--desc", help="Workspace description"),
+    enrich: bool = typer.Option(False, "--enrich", help="Run semantic enrichment after loading")
 ) -> None:
     """Load a SQL schema file into a workspace."""
     from sqlgenx.cli.commands.load import load_schema
     load_schema(schema_file, name, dbms, description)
+    
+    # Run enrichment if requested
+    if enrich:
+        from sqlgenx.cli.commands.enrich import enrich_workspace
+        enrich_workspace(workspace=name, force=False, skip_llm=False)
 
 
 @app.command()
@@ -176,6 +186,7 @@ def repair(
     from sqlgenx.cli.commands.diagnose import repair_workspace
     repair_workspace(workspace, force)
 
+
 @app.command()
 def cache(
     clear: bool = typer.Option(False, "--clear", help="Clear all cache"),
@@ -185,6 +196,35 @@ def cache(
     """Manage cache."""
     from sqlgenx.cli.commands.cache import cache_cmd
     cache_cmd(clear, stats, workspace)
+
+
+# ============================================================================
+# NEW: SEMANTIC ENRICHMENT COMMANDS
+# ============================================================================
+
+@app.command()
+def enrich(
+    workspace: str = typer.Option(None, "--workspace", "-w", help="Workspace to enrich"),
+    force: bool = typer.Option(False, "--force", "-f", help="Force re-enrichment"),
+    skip_llm: bool = typer.Option(False, "--skip-llm", help="Skip LLM enrichment (static only)")
+) -> None:
+    """
+    Run semantic enrichment on workspace schema.
+    
+    Semantic enrichment adds business meaning, synonyms, metrics,
+    and domain context to improve query understanding and SQL generation.
+    """
+    from sqlgenx.cli.commands.enrich import enrich_workspace
+    enrich_workspace(workspace, force, skip_llm)
+
+
+@app.command()
+def semantic(
+    workspace: str = typer.Option(None, "--workspace", "-w", help="Workspace to show info for")
+) -> None:
+    """Show semantic enrichment information for workspace."""
+    from sqlgenx.cli.commands.enrich import show_semantic_info
+    show_semantic_info(workspace)
 
 
 if __name__ == "__main__":
