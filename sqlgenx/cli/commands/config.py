@@ -23,7 +23,7 @@ def config_cmd(key: Optional[str], value: Optional[str], show: bool) -> None:
         console.print()
         table = Table(title="SQLGenX Configuration", show_header=True, header_style="bold violet")
         table.add_column("Setting", style="cyan", width=25)
-        table.add_column("Value", style="green")
+        table.add_column("Value", style="cyan2")
         
         # Show key settings
         current_ws = config_manager.get_current_workspace()

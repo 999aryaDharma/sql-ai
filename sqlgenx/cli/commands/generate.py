@@ -3,6 +3,15 @@ from typing import Optional
 import typer
 import sys
 import os
+from sqlgenx.core.data_analyzer import DataAnalyzer
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.table import Table as RichTable
+from sqlgenx.core.db_connector import ConnectionManager, DatabaseConnection
+import pyperclip
+from sqlgenx.core.llm_engine import LLMEngine
+import traceback
+
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -101,7 +110,6 @@ def generate_sql(
             progress.stop()
             console.print()
             print_error(f"Failed to generate SQL: {str(e)}")
-            import traceback
             print_info(f"Error details: {traceback.format_exc()}")
             print_info("Check your API key and internet connection")
             raise typer.Exit(1)
@@ -128,7 +136,7 @@ def generate_sql(
         print_error("No SQL was generated")
         raise typer.Exit(1)
     
-    print_sql(final_sql, title=f"Generated SQL ({meta.dbms_type})")
+    print_sql(final_sql, title=f"Generated SQL ({meta.dbms_type})", line_numbers=False)
     
     # Show validation warnings
     validation_result = result.get("validation_result")
@@ -140,7 +148,6 @@ def generate_sql(
     
     # Explain query if requested
     if explain:
-        from sqlgenx.core.llm_engine import LLMEngine
         console.print()
         with Progress(
             SpinnerColumn(),
@@ -165,7 +172,6 @@ def generate_sql(
     # Copy to clipboard if requested
     if copy:
         try:
-            import pyperclip
             pyperclip.copy(final_sql)
             console.print()
             print_success("SQL copied to clipboard! ✂️")
@@ -183,8 +189,6 @@ def generate_sql(
         console.print("[bold yellow]⚡ Executing query...[/bold yellow]")
         
         # Check if connection exists
-        from sqlgenx.core.db_connector import ConnectionManager, DatabaseConnection
-        
         conn_manager = ConnectionManager(workspace_dir)
         connections = conn_manager.list_connections()
         
@@ -217,8 +221,6 @@ def generate_sql(
             print_success(f"Query executed successfully! Retrieved {len(df)} rows")
             
             # Display results
-            from rich.table import Table as RichTable
-            
             console.print()
             results_table = RichTable(
                 title="Query Results",
@@ -251,7 +253,7 @@ def generate_sql(
                 ) as progress:
                     task = progress.add_task("🧠 Analyzing results with AI...", total=None)
                     
-                    from sqlgenx.core.data_analyzer import DataAnalyzerEnhanced as DataAnalyzer
+
                     analyzer = DataAnalyzer(api_key)
                     result = analyzer.analyze_results(
                         df=df,
@@ -269,13 +271,11 @@ def generate_sql(
                     progress.update(task, description="✓ Analysis complete")
                 
                 console.print()
-                from rich.markdown import Markdown
-                from rich.panel import Panel
                 md = Markdown(insights)
                 panel = Panel(
                     md,
                     title="🎯 AI Insights & Analysis",
-                    border_style="green",
+                    border_style="cyan2",
                     padding=(1, 2)
                 )
                 console.print(panel)

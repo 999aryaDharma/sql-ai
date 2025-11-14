@@ -50,7 +50,7 @@ class TokenEstimator:
         return estimated_full, needs_truncation
 
 
-class DataAnalyzerEnhanced:
+class DataAnalyzer:
     """Enhanced data analyzer with token limits and cost awareness."""
     
     # Default token limits
@@ -61,7 +61,7 @@ class DataAnalyzerEnhanced:
     def __init__(self, api_key: str):
         """Initialize enhanced data analyzer."""
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash-lite",
             google_api_key=api_key,
             temperature=0.3,
             max_tokens=2048

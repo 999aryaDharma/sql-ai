@@ -4,6 +4,11 @@ import typer
 import sys
 import os
 from pathlib import Path
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from sqlgenx.core.schema_loader import SchemaLoader
+from sqlgenx.core.vector_store import VectorStore
+from sqlgenx.utils.rich_helpers import confirm
+from sqlgenx.core.schema_loader import SchemaLoader
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
@@ -118,7 +123,7 @@ def diagnose_workspace(workspace: Optional[str] = None) -> None:
     table.add_column("Details", style="dim")
     
     for check in checks:
-        style = "green" if check["ok"] else "red"
+        style = "cyan2" if check["ok"] else "red"
         details = check.get("details", "")
         if not check["ok"] and not details:
             details = check["path"]
@@ -158,8 +163,6 @@ def diagnose_workspace(workspace: Optional[str] = None) -> None:
         console.print("[bold]Schema Content:[/bold]")
         
         try:
-            from sqlgenx.core.schema_loader import SchemaLoader
-            
             meta = workspace_manager._load_meta(workspace_dir)
             dialect = normalize_dialect(meta.dbms_type if meta else "")
             
@@ -215,14 +218,9 @@ def repair_workspace(workspace: Optional[str] = None, force: bool = False) -> No
     console.print()
     
     if not force:
-        from sqlgenx.utils.rich_helpers import confirm
         if not confirm("This will rebuild embeddings. Continue?", default=True):
             print_info("Repair cancelled")
             return
-    
-    from rich.progress import Progress, SpinnerColumn, TextColumn
-    from sqlgenx.core.schema_loader import SchemaLoader
-    from sqlgenx.core.vector_store import VectorStore
     
     with Progress(
         SpinnerColumn(),

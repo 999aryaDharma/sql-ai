@@ -12,7 +12,7 @@ console = Console()
 
 def print_success(message: str) -> None:
     """Print a success message."""
-    console.print(f"[bold green]✓[/bold green] {message}")
+    console.print(f"[bold cyan2]✓[/bold cyan2] {message}")
 
 
 def print_error(message: str) -> None:
@@ -30,10 +30,10 @@ def print_warning(message: str) -> None:
     console.print(f"[bold yellow]⚠[/bold yellow] {message}", style="yellow")
 
 
-def print_sql(sql: str, title: str = "Generated SQL") -> None:
+def print_sql(sql: str, title: str = "Generated SQL", line_numbers: bool = False) -> None:
     """Print SQL code with syntax highlighting."""
-    syntax = Syntax(sql, "sql", theme="monokai", line_numbers=True)
-    panel = Panel(syntax, title=title, border_style="green")
+    syntax = Syntax(sql, "sql", theme="monokai", line_numbers=line_numbers)
+    panel = Panel(syntax, title=title, border_style="cyan2")
     console.print(panel)
 
 
@@ -45,7 +45,7 @@ def print_workspaces(workspaces: List, current: str) -> None:
     
     table = Table(title="Available Workspaces", show_header=True, header_style="bold violet")
     
-    table.add_column("Active", style="green", width=6)
+    table.add_column("Active", style="cyan2", width=6)
     table.add_column("Name", style="cyan")
     table.add_column("DBMS", style="yellow")
     table.add_column("Last Used", style="dim")

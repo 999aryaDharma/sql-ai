@@ -3,13 +3,14 @@ from typing import Optional
 import typer
 import sys
 import os
+from rich.markdown import Markdown
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from sqlgenx.utils.workspace_manager import WorkspaceManager, ConfigManager
 from sqlgenx.utils.rich_helpers import print_success, print_error, print_info, console
 from sqlgenx.core.db_connector import DatabaseConnection, ConnectionManager
-from sqlgenx.core.data_analyzer import DataAnalyzerEnhanced as DataAnalyzer
+from sqlgenx.core.data_analyzer import DataAnalyzer
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.panel import Panel
@@ -128,12 +129,11 @@ def execute_query(
         
         console.print()
         # Use Markdown rendering for better formatting
-        from rich.markdown import Markdown
         md = Markdown(insights)
         panel = Panel(
             md,
             title="🎯 AI Insights & Analysis",
-            border_style="green",
+            border_style="cyan2",
             padding=(1, 2)
         )
         console.print(panel)

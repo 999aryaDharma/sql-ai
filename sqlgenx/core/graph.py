@@ -4,7 +4,7 @@ from pathlib import Path
 from langgraph.graph import StateGraph, END
 from .schema_loader import SchemaLoader, SchemaInfo
 from .vector_store import VectorStore
-from .llm_engine import LLMEngineEnhanced as LLMEngine
+from .llm_engine import LLMEngine
 from .validator import SQLValidator, ValidationResult
 
 
@@ -42,10 +42,9 @@ class SQLGenerationGraph:
         workflow.add_node("retrieve_context", self._retrieve_context)
         workflow.add_node("create_plan", self._create_plan)
         workflow.add_node("validate_nl_query", self._validate_nl_query)
-        workflow.add_node("generate_sql", self._generate_sql)
         workflow.add_node("validate_sql", self._validate_sql)
-        workflow.add_node("refine_sql", self._refine_sql)
-        workflow.add_node("suggest_optimizations", self._suggest_optimizations)
+        workflow.add_node("plan_and_generate", self._plan_and_generate)
+        workflow.add_node("optimize_and_refine", self._optimize_and_refine)
         
         # Define edges
         workflow.set_entry_point("load_schema")
@@ -55,17 +54,16 @@ class SQLGenerationGraph:
             self._decide_to_generate,
             {"continue": "retrieve_context", "end": END},
         )
-        workflow.add_edge("retrieve_context", "create_plan")
-        workflow.add_edge("create_plan", "generate_sql")
-        workflow.add_edge("generate_sql", "validate_sql")
+        workflow.add_edge("retrieve_context", "plan_and_generate")
+        workflow.add_edge("plan_and_generate", "validate_sql")
         workflow.add_conditional_edges(
             "validate_sql",
-            lambda s: "suggest_optimizations" if not s.get("errors") else END
+            lambda s: "optimize_and_refine" if not s.get("errors") else END
         )
         workflow.add_conditional_edges(
-            "suggest_optimizations", self._decide_to_refine, {"refine": "refine_sql", "end": END}
+            "optimize_and_refine", self._decide_to_refine_optimized, {"refine": "optimize_and_refine", "end": END}
         )
-        workflow.add_edge("refine_sql", "validate_sql") # <-- Ini adalah siklus rekursif
+        # Note: optimize_and_refine node handles both suggesting and refining in one call
         
         return workflow.compile()
     
@@ -133,6 +131,93 @@ class SQLGenerationGraph:
             state["errors"].append(f"Error during NL query validation: {str(e)}")
             
         return state
+
+    def _clean_ansi_codes(self, text: str) -> str:
+        """Clean ANSI color codes from text."""
+        import re
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        return ansi_escape.sub('', text)
+
+    def _plan_and_generate(self, state: GraphState) -> GraphState:
+        """Create plan and generate SQL in a single LLM call."""
+        if state.get("errors"):
+            return state
+
+        try:
+            llm_engine = LLMEngine(self.api_key)
+            execution_plan, sql_query = llm_engine.create_plan_and_generate_sql(
+                state["user_query"],
+                state["retrieved_contexts"],
+                state.get("dbms_type", "generic")
+            )
+            
+            # Remove ANSI color codes from the SQL
+            cleaned_sql = self._clean_ansi_codes(sql_query)
+            
+            # Update both plan and generated SQL
+            state["plan"] = execution_plan
+            state["generated_sql"] = cleaned_sql
+            
+        except Exception as e:
+            state["errors"].append(f"Failed to create plan and generate SQL: {str(e)}")
+            
+        return state
+
+    def _optimize_and_refine(self, state: GraphState) -> GraphState:
+        """Suggest optimizations and refine SQL in a single LLM call."""
+        if state.get("errors"):
+            return state
+
+        try:
+            llm_engine = LLMEngine(self.api_key)
+            state["refinement_count"] = state.get("refinement_count", 0) + 1
+            
+            # Use the function that generates both plan and optimizations
+            execution_plan, optimization_suggestions = llm_engine.generate_plan_refine_and_optimize(
+                state["user_query"],
+                state["final_sql"],
+                state["retrieved_contexts"],
+                state.get("dbms_type", "generic")
+            )
+            
+            # Update state with optimization suggestions
+            state["optimizations"] = optimization_suggestions
+            
+            # Refine the SQL based on suggestions
+            refined_sql = llm_engine.refine_sql_with_suggestions(
+                original_sql=state["final_sql"],
+                user_query=state["user_query"],
+                suggestions=optimization_suggestions,
+                dbms_type=state["dbms_type"]
+            )
+            
+            cleaned_refined_sql = self._clean_ansi_codes(refined_sql)
+            
+            state["generated_sql"] = cleaned_refined_sql  # Updated SQL after refinement
+            
+        except Exception as e:
+            state["errors"].append(f"Failed to optimize and refine SQL: {str(e)}")
+            
+        return state
+
+    def _decide_to_refine_optimized(self, state: GraphState) -> str:
+        """Decide whether to continue refining or end the process."""
+        refinement_count = state.get("refinement_count", 0)
+        optimizations = state.get("optimizations", "")
+
+        # Jika sudah mencapai batas, berhenti
+        if refinement_count >= self.max_refinements:
+            state["optimizations"] = None # Hapus sisa saran agar tidak ditampilkan
+            return "end"
+
+        # Jika tidak ada saran optimisasi yang berarti, berhenti
+        if not optimizations or "already optimal" in optimizations.lower():
+            # Ini adalah kondisi keluar yang ideal. Kueri sudah optimal.
+            state["optimizations"] = None # Hapus pesan "already optimal"
+            return "end"
+
+        # Jika ada saran, lanjutkan untuk perbaikan
+        return "refine"
 
     def _decide_to_generate(self, state: GraphState) -> str:
         """Decide whether to continue generation or end."""
