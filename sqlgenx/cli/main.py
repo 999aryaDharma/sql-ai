@@ -39,11 +39,12 @@ def generate(
     copy: bool = typer.Option(False, "--copy", "-c", help="Copy SQL to clipboard"),
     run: bool = typer.Option(False, "--run", "-r", help="Execute query on connected database"),
     limit: int = typer.Option(None, "--limit", "-l", help="Limit number of results"),
-    analyze: bool = typer.Option(False, "--analyze", "-a", help="Analyze results with AI (requires --run)")
+    analyze: bool = typer.Option(False, "--analyze", "-a", help="Analyze results with AI (requires --run)"),
+    fast: bool = typer.Option(False, "--fast", "-f", help="Skip optimization (faster)")
 ) -> None:
     """Generate SQL from natural language query."""
     from sqlgenx.cli.commands.generate import generate_sql
-    generate_sql(query, workspace, explain, copy, run, limit, analyze)
+    generate_sql(query, workspace, explain, copy, run, limit, analyze, fast)
 
 
 @app.command()
@@ -174,6 +175,16 @@ def repair(
     """Repair workspace by rebuilding embeddings."""
     from sqlgenx.cli.commands.diagnose import repair_workspace
     repair_workspace(workspace, force)
+
+@app.command()
+def cache(
+    clear: bool = typer.Option(False, "--clear", help="Clear all cache"),
+    stats: bool = typer.Option(False, "--stats", help="Show cache statistics"),
+    workspace: str = typer.Option(None, "--workspace", "-w", help="Workspace to manage")
+) -> None:
+    """Manage cache."""
+    from sqlgenx.cli.commands.cache import cache_cmd
+    cache_cmd(clear, stats, workspace)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,16 @@
-"""LangGraph workflow for SQL generation."""
-from typing import TypedDict, List, Dict, Any
+"""
+Optimized LangGraph workflow with reduced API calls.
+Replace the existing graph.py with this file.
+"""
+from typing import TypedDict, List, Dict, Any, Optional
 from pathlib import Path
 from langgraph.graph import StateGraph, END
+
 from .schema_loader import SchemaLoader, SchemaInfo
 from .vector_store import VectorStore
 from .llm_engine import LLMEngine
 from .validator import SQLValidator, ValidationResult
+from ..utils.output_sanitizer import OutputSanitizer
 
 
 class GraphState(TypedDict):
@@ -13,24 +18,35 @@ class GraphState(TypedDict):
     workspace_dir: Path
     user_query: str
     dbms_type: str
-    schema_info: SchemaInfo | None
+    schema_info: Optional[SchemaInfo]
     retrieved_contexts: List[Dict[str, Any]]
-    plan: str | None
+    execution_plan: str
     generated_sql: str
-    validation_result: ValidationResult | None
+    validation_result: Optional[ValidationResult]
     refinement_count: int
-    optimizations: str | None
     final_sql: str
     errors: List[str]
+    warnings: List[str]
+    
+    # Optimization control
+    skip_optimization: bool
+    optimization_suggestions: Optional[str]
 
 
 class SQLGenerationGraph:
-    """LangGraph workflow for generating SQL queries."""
+    """Optimized LangGraph workflow for generating SQL queries."""
     
-    def __init__(self, api_key: str):
-        """Initialize the workflow graph."""
-        self.max_refinements = 2  # Batasi perulangan untuk menghindari loop tak terbatas
+    def __init__(self, api_key: str, workspace_dir: Optional[Path] = None):
+        """
+        Initialize the workflow graph.
+        
+        Args:
+            api_key: Gemini API key
+            workspace_dir: Workspace directory for caching
+        """
+        self.max_refinements = 1  
         self.api_key = api_key
+        self.workspace_dir = workspace_dir
         self.graph = self._build_graph()
     
     def _build_graph(self) -> StateGraph:
@@ -39,31 +55,38 @@ class SQLGenerationGraph:
         
         # Add nodes
         workflow.add_node("load_schema", self._load_schema)
+        workflow.add_node("validate_nl_query", self._validate_nl_query)
         workflow.add_node("retrieve_context", self._retrieve_context)
         workflow.add_node("create_plan", self._create_plan)
-        workflow.add_node("validate_nl_query", self._validate_nl_query)
+        workflow.add_node("generate_sql", self._generate_sql)
         workflow.add_node("validate_sql", self._validate_sql)
-        workflow.add_node("plan_and_generate", self._plan_and_generate)
-        workflow.add_node("optimize_and_refine", self._optimize_and_refine)
+        workflow.add_node("optimize_if_needed", self._optimize_if_needed)
         
         # Define edges
         workflow.set_entry_point("load_schema")
         workflow.add_edge("load_schema", "validate_nl_query")
+        
         workflow.add_conditional_edges(
             "validate_nl_query",
-            self._decide_to_generate,
-            {"continue": "retrieve_context", "end": END},
+            self._decide_after_nl_validation,
+            {"continue": "retrieve_context", "end": END}
         )
-        workflow.add_edge("retrieve_context", "plan_and_generate")
-        workflow.add_edge("plan_and_generate", "validate_sql")
+        
+        workflow.add_edge("retrieve_context", "create_plan")
+        workflow.add_edge("create_plan", "generate_sql")
+        workflow.add_edge("generate_sql", "validate_sql")
+        
         workflow.add_conditional_edges(
             "validate_sql",
-            lambda s: "optimize_and_refine" if not s.get("errors") else END
+            self._decide_after_validation,
+            {"optimize": "optimize_if_needed", "end": END}
         )
+        
         workflow.add_conditional_edges(
-            "optimize_and_refine", self._decide_to_refine_optimized, {"refine": "optimize_and_refine", "end": END}
+            "optimize_if_needed",
+            self._decide_after_optimization,
+            {"refine": "validate_sql", "end": END}
         )
-        # Note: optimize_and_refine node handles both suggesting and refining in one call
         
         return workflow.compile()
     
@@ -77,7 +100,6 @@ class SQLGenerationGraph:
             return state
         
         try:
-            # Determine dialect
             dialect = state.get("dbms_type", "")
             if dialect == "generic":
                 dialect = ""
@@ -85,7 +107,6 @@ class SQLGenerationGraph:
             loader = SchemaLoader(dialect=dialect)
             schema_info = loader.load_from_file(schema_file)
             
-            # Verify schema has tables
             if not schema_info or not schema_info.tables:
                 state["errors"].append("No tables found in schema")
                 return state
@@ -93,140 +114,46 @@ class SQLGenerationGraph:
             state["schema_info"] = schema_info
         except Exception as e:
             state["errors"].append(f"Failed to load schema: {str(e)}")
-            import traceback
-            print(f"DEBUG - Schema load error: {traceback.format_exc()}")
         
         return state
     
     def _validate_nl_query(self, state: GraphState) -> GraphState:
-        """Validate the user's natural language query against the schema."""
+        """Validate the user's natural language query."""
         if state.get("errors") or not state["schema_info"]:
             return state
         
         try:
-            llm_engine = LLMEngine(self.api_key)
-            # Create more detailed schema context including table and column names
-            detailed_schema_context = []
-            for table in state["schema_info"].tables:
-                table_info = f"Table '{table.name}' has columns: "
-                column_info = ", ".join([f"'{col.name}' ({col.data_type})" for col in table.columns])
-                table_info += column_info
-                detailed_schema_context.append(table_info)
-                
-            schema_context_str = " | ".join(detailed_schema_context)
+            llm_engine = LLMEngine(self.api_key, self.workspace_dir)
             
-            # Get table names as fallback
+            # Build detailed schema context
+            detailed_schema = []
+            for table in state["schema_info"].tables:
+                cols = ", ".join([f"'{c.name}' ({c.data_type})" for c in table.columns])
+                detailed_schema.append(f"Table '{table.name}': {cols}")
+            
+            schema_context = " | ".join(detailed_schema)
             table_names = [t.name for t in state["schema_info"].tables]
             
-            # Use the detailed schema context for validation
             is_valid, reason = llm_engine.validate_user_query(
-                state["user_query"], 
-                table_names, 
-                schema_context_str
+                state["user_query"],
+                table_names,
+                schema_context
             )
             
             if not is_valid:
                 state["errors"].append(f"Query validation failed: {reason}")
+        
         except Exception as e:
-            state["errors"].append(f"Error during NL query validation: {str(e)}")
-            
+            state["errors"].append(f"NL validation error: {str(e)}")
+        
         return state
-
-    def _clean_ansi_codes(self, text: str) -> str:
-        """Clean ANSI color codes from text."""
-        import re
-        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        return ansi_escape.sub('', text)
-
-    def _plan_and_generate(self, state: GraphState) -> GraphState:
-        """Create plan and generate SQL in a single LLM call."""
-        if state.get("errors"):
-            return state
-
-        try:
-            llm_engine = LLMEngine(self.api_key)
-            execution_plan, sql_query = llm_engine.create_plan_and_generate_sql(
-                state["user_query"],
-                state["retrieved_contexts"],
-                state.get("dbms_type", "generic")
-            )
-            
-            # Remove ANSI color codes from the SQL
-            cleaned_sql = self._clean_ansi_codes(sql_query)
-            
-            # Update both plan and generated SQL
-            state["plan"] = execution_plan
-            state["generated_sql"] = cleaned_sql
-            
-        except Exception as e:
-            state["errors"].append(f"Failed to create plan and generate SQL: {str(e)}")
-            
-        return state
-
-    def _optimize_and_refine(self, state: GraphState) -> GraphState:
-        """Suggest optimizations and refine SQL in a single LLM call."""
-        if state.get("errors"):
-            return state
-
-        try:
-            llm_engine = LLMEngine(self.api_key)
-            state["refinement_count"] = state.get("refinement_count", 0) + 1
-            
-            # Use the function that generates both plan and optimizations
-            execution_plan, optimization_suggestions = llm_engine.generate_plan_refine_and_optimize(
-                state["user_query"],
-                state["final_sql"],
-                state["retrieved_contexts"],
-                state.get("dbms_type", "generic")
-            )
-            
-            # Update state with optimization suggestions
-            state["optimizations"] = optimization_suggestions
-            
-            # Refine the SQL based on suggestions
-            refined_sql = llm_engine.refine_sql_with_suggestions(
-                original_sql=state["final_sql"],
-                user_query=state["user_query"],
-                suggestions=optimization_suggestions,
-                dbms_type=state["dbms_type"]
-            )
-            
-            cleaned_refined_sql = self._clean_ansi_codes(refined_sql)
-            
-            state["generated_sql"] = cleaned_refined_sql  # Updated SQL after refinement
-            
-        except Exception as e:
-            state["errors"].append(f"Failed to optimize and refine SQL: {str(e)}")
-            
-        return state
-
-    def _decide_to_refine_optimized(self, state: GraphState) -> str:
-        """Decide whether to continue refining or end the process."""
-        refinement_count = state.get("refinement_count", 0)
-        optimizations = state.get("optimizations", "")
-
-        # Jika sudah mencapai batas, berhenti
-        if refinement_count >= self.max_refinements:
-            state["optimizations"] = None # Hapus sisa saran agar tidak ditampilkan
-            return "end"
-
-        # Jika tidak ada saran optimisasi yang berarti, berhenti
-        if not optimizations or "already optimal" in optimizations.lower():
-            # Ini adalah kondisi keluar yang ideal. Kueri sudah optimal.
-            state["optimizations"] = None # Hapus pesan "already optimal"
-            return "end"
-
-        # Jika ada saran, lanjutkan untuk perbaikan
-        return "refine"
-
-    def _decide_to_generate(self, state: GraphState) -> str:
-        """Decide whether to continue generation or end."""
-        if state.get("errors"):
-            return "end"
-        return "continue"
-
+    
+    def _decide_after_nl_validation(self, state: GraphState) -> str:
+        """Decide whether to continue after NL validation."""
+        return "end" if state.get("errors") else "continue"
+    
     def _retrieve_context(self, state: GraphState) -> GraphState:
-        """Retrieve relevant schema context from vector store."""
+        """Retrieve relevant schema context."""
         if state.get("errors"):
             return state
         
@@ -235,43 +162,70 @@ class SQLGenerationGraph:
             contexts = vector_store.retrieve_context(state["user_query"], n_results=5)
             state["retrieved_contexts"] = contexts
         except Exception as e:
-            state["errors"].append(f"Failed to retrieve context: {str(e)}")
+            state["errors"].append(f"Context retrieval failed: {str(e)}")
         
         return state
     
     def _create_plan(self, state: GraphState) -> GraphState:
-        """Create a query plan using the LLM."""
+        """Create execution plan based on user query and schema context."""
         if state.get("errors"):
             return state
-        
+
         try:
-            llm_engine = LLMEngine(self.api_key)
-            plan = llm_engine.create_query_plan(
+            llm_engine = LLMEngine(self.api_key, self.workspace_dir)
+
+            # Format schema context
+            schema_context = "\n".join([
+                ctx.get("content", "") for ctx in state["retrieved_contexts"]
+            ])
+
+            # Create execution plan (with caching support)
+            execution_plan = llm_engine.create_execution_plan(
                 state["user_query"],
-                state["retrieved_contexts"]
+                schema_context,
+                state.get("dbms_type", "generic")
             )
-            state["plan"] = plan
+
+            # Check if the plan indicates validation failure
+            if execution_plan.startswith("VALIDATION_FAILED:"):
+                state["errors"].append(f"Query validation failed: {execution_plan[18:].strip()}")
+                return state
+
+            # Clean output (sanitizer already applied in LLM engine)
+            state["execution_plan"] = execution_plan
+
         except Exception as e:
-            state["errors"].append(f"Failed to create a plan: {str(e)}")
+            state["errors"].append(f"Plan creation failed: {str(e)}")
+
         return state
 
     def _generate_sql(self, state: GraphState) -> GraphState:
-        """Generate SQL using LLM."""
-        if state.get("errors"):
+        """Generate SQL based on execution plan."""
+        if state.get("errors") or not state.get("execution_plan"):
             return state
-        
+
         try:
-            llm_engine = LLMEngine(self.api_key)
-            sql, attempts = llm_engine.generate_sql(
+            llm_engine = LLMEngine(self.api_key, self.workspace_dir)
+
+            # Format schema context
+            schema_context = "\n".join([
+                ctx.get("content", "") for ctx in state["retrieved_contexts"]
+            ])
+
+            # Generate SQL based on the plan (with caching support)
+            sql_query = llm_engine.generate_sql_from_plan(
                 state["user_query"],
-                state["plan"],
-                state["retrieved_contexts"],
+                state["execution_plan"],
+                schema_context,
                 state.get("dbms_type", "generic")
             )
-            state["generated_sql"] = sql
+
+            # Clean output (sanitizer already applied in LLM engine)
+            state["generated_sql"] = sql_query
+
         except Exception as e:
-            state["errors"].append(f"Failed to generate SQL: {str(e)}")
-        
+            state["errors"].append(f"SQL generation failed: {str(e)}")
+
         return state
     
     def _validate_sql(self, state: GraphState) -> GraphState:
@@ -285,7 +239,6 @@ class SQLGenerationGraph:
             state["validation_result"] = validation
             
             if validation.is_valid:
-                # Format the SQL for better readability
                 formatted_sql = validator.format_sql(state["generated_sql"])
                 
                 # Check schema compatibility
@@ -301,104 +254,139 @@ class SQLGenerationGraph:
                             f"Query uses tables not in schema: {', '.join(missing)}"
                         )
                     else:
-                        # If compatible, normalize table names to match actual table names in database
-                        # Create mapping from lowercase to actual case
+                        # Normalize table name case
+                        import re
                         table_case_map = {t.lower(): t for t in available_tables}
                         
-                        # Replace table names in the SQL to match actual database case
-                        import re
-                        sql_to_use = formatted_sql
                         for lower_name, actual_name in table_case_map.items():
-                            # Replace table names while being careful not to replace partial matches
                             pattern = r'\b(' + re.escape(lower_name) + r')\b'
-                            sql_to_use = re.sub(pattern, actual_name, sql_to_use, flags=re.IGNORECASE)
-                        
-                        formatted_sql = sql_to_use
-
+                            formatted_sql = re.sub(
+                                pattern, 
+                                actual_name, 
+                                formatted_sql, 
+                                flags=re.IGNORECASE
+                            )
+                
                 state["final_sql"] = formatted_sql
             else:
                 state["errors"].extend(validation.errors)
         
         except Exception as e:
-            state["errors"].append(f"Failed to validate SQL: {str(e)}")
+            state["errors"].append(f"Validation failed: {str(e)}")
         
         return state
     
-    def _decide_to_refine(self, state: GraphState) -> str:
-        """Decide whether to refine the query or end the process."""
-        refinement_count = state.get("refinement_count", 0)
-        optimizations = state.get("optimizations", "")
-
-        # Jika sudah mencapai batas, berhenti
-        if refinement_count >= self.max_refinements:
-            state["optimizations"] = None # Hapus sisa saran agar tidak ditampilkan
-            return "end"
-
-        # Jika tidak ada saran optimisasi yang berarti, berhenti
-        if not optimizations or "already optimal" in optimizations.lower():
-            # Ini adalah kondisi keluar yang ideal. Kueri sudah optimal.
-            state["optimizations"] = None # Hapus pesan "already optimal"
-            return "end"
-
-        # Jika ada saran, lanjutkan untuk perbaikan
-        return "refine"
-
-    def _refine_sql(self, state: GraphState) -> GraphState:
-        """Refine the SQL query based on optimization suggestions."""
+    def _decide_after_validation(self, state: GraphState) -> str:
+        """Decide whether to optimize after validation."""
+        # If errors, end immediately
         if state.get("errors"):
+            return "end"
+        
+        # If no SQL generated, end
+        if not state.get("final_sql"):
+            return "end"
+        
+        # Check if we should skip optimization
+        llm_engine = LLMEngine(self.api_key, self.workspace_dir)
+        
+        # ✅ KEY OPTIMIZATION: Skip optimization for simple queries
+        if not llm_engine.should_optimize(state["final_sql"]):
+            state["skip_optimization"] = True
+            state["warnings"].append("Query is simple, skipping optimization")
+            return "end"
+        
+        # Check refinement limit
+        if state.get("refinement_count", 0) >= self.max_refinements:
+            return "end"
+        
+        return "optimize"
+    
+    def _optimize_if_needed(self, state: GraphState) -> GraphState:
+        """Suggest optimizations and refine SQL if needed."""
+        if state.get("errors") or state.get("skip_optimization"):
             return state
-
-        state["refinement_count"] = state.get("refinement_count", 0) + 1
         
         try:
-            llm_engine = LLMEngine(self.api_key)
-            refined_sql = llm_engine.refine_sql_with_suggestions(
-                original_sql=state["final_sql"],
-                user_query=state["user_query"],
-                suggestions=state["optimizations"],
-                dbms_type=state["dbms_type"]
-            )
-            state["generated_sql"] = refined_sql # Ganti SQL yang akan divalidasi selanjutnya
-        except Exception as e:
-            state["errors"].append(f"Failed to refine SQL: {str(e)}")
-        return state
-
-    def _suggest_optimizations(self, state: GraphState) -> GraphState:
-        """Suggest optimizations for the generated SQL."""
-        if state.get("errors") or not state.get("final_sql"):
-            return state
-        
-        try:
-            llm_engine = LLMEngine(self.api_key)
+            llm_engine = LLMEngine(self.api_key, self.workspace_dir)
+            
+            # Get optimization suggestions (with caching)
             suggestions = llm_engine.suggest_optimizations(
                 state["final_sql"],
                 state["dbms_type"]
             )
-            state["optimizations"] = suggestions
+            
+            state["optimization_suggestions"] = suggestions
+            
+            # Check if optimization is actually needed
+            if "already" in suggestions.lower() and "optimal" in suggestions.lower():
+                state["warnings"].append("Query is already well-optimized")
+                return state
+            
+            # Refine SQL based on suggestions
+            refined_sql = llm_engine.refine_sql_with_suggestions(
+                original_sql=state["final_sql"],
+                user_query=state["user_query"],
+                suggestions=suggestions,
+                dbms_type=state["dbms_type"]
+            )
+            
+            # Update state
+            state["generated_sql"] = refined_sql
+            state["refinement_count"] = state.get("refinement_count", 0) + 1
+            
         except Exception as e:
-            state["errors"].append(f"Failed to get optimizations: {str(e)}")
+            state["errors"].append(f"Optimization failed: {str(e)}")
+        
         return state
     
+    def _decide_after_optimization(self, state: GraphState) -> str:
+        """Decide whether to continue refining."""
+        refinement_count = state.get("refinement_count", 0)
+        suggestions = state.get("optimization_suggestions", "")
+        
+        # Reached refinement limit
+        if refinement_count >= self.max_refinements:
+            return "end"
+        
+        # No meaningful suggestions
+        if not suggestions or "already optimal" in suggestions.lower():
+            return "end"
+        
+        # Continue refining
+        return "refine"
+    
     def run(
-        self, 
-        workspace_dir: Path, 
-        user_query: str, 
+        self,
+        workspace_dir: Path,
+        user_query: str,
         dbms_type: str = "generic"
     ) -> GraphState:
-        """Run the SQL generation workflow."""
+        """
+        Run the SQL generation workflow.
+        
+        Args:
+            workspace_dir: Workspace directory
+            user_query: User's natural language query
+            dbms_type: Database type
+            
+        Returns:
+            Final graph state
+        """
         initial_state: GraphState = {
             "workspace_dir": workspace_dir,
             "user_query": user_query,
             "dbms_type": dbms_type,
             "schema_info": None,
             "retrieved_contexts": [],
-            "plan": None,
+            "execution_plan": "",
             "generated_sql": "",
             "validation_result": None,
             "refinement_count": 0,
-            "optimizations": None,
             "final_sql": "",
-            "errors": []
+            "errors": [],
+            "warnings": [],
+            "skip_optimization": False,
+            "optimization_suggestions": None
         }
         
         result = self.graph.invoke(initial_state)

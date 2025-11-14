@@ -34,7 +34,8 @@ def generate_sql(
     copy: bool,
     run: bool = False,
     limit: Optional[int] = None,
-    analyze: bool = False
+    analyze: bool = False,
+    fast: bool = False
 ) -> None:
     """Generate SQL from natural language query."""
     
@@ -94,7 +95,10 @@ def generate_sql(
                 print_info("Try: sqlgenx sync or reconnect with: sqlgenx connect")
                 raise typer.Exit(1)
             
-            graph = SQLGenerationGraph(api_key)
+            graph = SQLGenerationGraph(api_key, workspace_dir=workspace_dir)
+
+            if fast:
+                console.print("[dim]⚡ Fast mode enabled: skipping optimization step[/dim]")
             
             progress.update(task, description="🔍 Retrieving schema context...")
             
@@ -279,6 +283,14 @@ def generate_sql(
                     padding=(1, 2)
                 )
                 console.print(panel)
+        
+            # At the end of generate_sql function in generate.py
+            from sqlgenx.core.rate_limiting.limiter import global_rate_limiter
+
+            stats = global_rate_limiter.get_current_usage()
+            if stats['rate_limit_hits'] > 0:
+                console.print(f"\n[dim]Rate limit hits: {stats['rate_limit_hits']}[/dim]")
+                console.print(f"[dim]Total wait time: {stats['total_wait_time']:.1f}s[/dim]")
         
         except Exception as e:
             console.print()
