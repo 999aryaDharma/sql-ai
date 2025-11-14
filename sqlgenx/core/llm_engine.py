@@ -22,7 +22,7 @@ class LLMEngine:
         self,
         api_key: str,
         workspace_dir: Optional[Path] = None,
-        model: str = "gemini-2.5-flash-lite",
+        model: str = "gemini-2.5-flash",
         enable_cache: bool = True
     ):
         """
@@ -226,51 +226,56 @@ Return ONLY the corrected SQL query, nothing else."""
             raise
 
     def validate_user_query(
-        self,
-        user_query: str,
-        table_names: List[str],
-        schema_context: str = ""
+    self,
+    user_query: str,
+    table_names: List[str],
+    schema_context: str = ""
     ) -> Tuple[bool, str]:
         """
         Validate if user query is relevant to schema.
-
+        
         Args:
             user_query: User's natural language query
             table_names: Available table names
-            schema_context: Detailed schema context
-
+            schema_context: Detailed schema context (CRITICAL for validation)
+            
         Returns:
             Tuple of (is_valid, reason)
         """
+        
+        # Build comprehensive prompt with schema details
         if schema_context:
             prompt = f"""You are a database analyst. Determine if a user's question is answerable given detailed schema information.
 
-Schema Information:
-{schema_context}
+    Schema Information:
+    {schema_context}
 
-User query: "{user_query}"
+    User query: "{user_query}"
 
-CRITICAL: When evaluating, consider:
-1. Can required data be accessed through direct table access?
-2. Can required data be accessed through table relationships (joins)?
-3. For temporal queries: Can dates be accessed through related tables if not in the primary table?
-4. For example: If user wants date-based filtering on items that don't have date columns, but the items are linked to transactions that have dates, this IS POSSIBLE through JOIN.
-5. Only mark as invalid if there is truly NO PATH to access required information.
+    CRITICAL: When evaluating, consider:
+    1. Can required data be accessed through direct table access?
+    2. Can required data be accessed through table relationships (joins)?
+    3. For temporal queries: Can dates be accessed through related tables if not in the primary table?
+    4. For example: If user wants date-based filtering on items that don't have date columns, but the items are linked to transactions that have dates, this IS POSSIBLE through JOIN.
+    5. For aggregation queries: Can metrics be calculated by combining columns (e.g., quantity * price = revenue)?
+    6. Only mark as invalid if there is truly NO PATH to access required information.
 
-Is this query relevant and answerable using the schema provided (including through table relationships)?
-Respond with only "VALID" or "INVALID: [reason]"."""
+    Is this query relevant and answerable using the schema provided (including through table relationships and calculated fields)?
+    Respond with only "VALID" or "INVALID: [reason]"."""
+        
         else:
+            # Fallback to basic validation (less accurate)
             prompt = f"""You are a database analyst. Determine if a user's question is answerable given table names.
 
-Available tables: {', '.join(table_names)}
+    Available tables: {', '.join(table_names)}
 
-User query: "{user_query}"
+    User query: "{user_query}"
 
-Is this query relevant and answerable using the tables provided?
-Respond with only "VALID" or "INVALID: [reason]"."""
-
+    Is this query relevant and answerable using the tables provided?
+    Respond with only "VALID" or "INVALID: [reason]"."""
+        
         response = self._make_api_call([HumanMessage(content=prompt)])
-
+        
         if response.upper().startswith("VALID"):
             return True, ""
         else:
@@ -403,6 +408,49 @@ Provide only the execution plan if possible, or the validation failure message:"
         execution_plan = OutputSanitizer.clean_text(response)
         return execution_plan
 
+    def create_execution_plan_from_validated_context(
+        self,
+        user_query: str,
+        schema_context: str,
+        dbms_type: str
+    ) -> str:
+        """
+        Create execution plan based on user query and validated schema context (no additional validation).
+        
+        This method assumes the context has already been validated by deterministic methods.
+
+        Args:
+            user_query: User's natural language query
+            schema_context: Schema context string (already validated)
+            dbms_type: Database type
+
+        Returns:
+            Execution plan string
+        """
+        prompt = f"""You are an expert SQL engineer with deep understanding of database schemas.
+
+Create an execution plan based on the validated schema context.
+
+Schema Context:
+{schema_context}
+
+Database Type: {dbms_type}
+
+User Request: "{user_query}"
+
+Create a detailed execution plan considering:
+1. Tables involved and their relationships (as shown in the schema context)
+2. Required joins and their conditions (based on foreign key relationships shown)
+3. Filters and where clauses (including any temporal filters needed)
+4. Aggregations and groupings needed
+5. How to properly group/aggregate across related tables
+
+Provide only the execution plan:"""
+
+        response = self._make_api_call([HumanMessage(content=prompt)])
+        execution_plan = OutputSanitizer.clean_text(response)
+        return execution_plan
+
     def generate_sql_from_plan(
         self,
         user_query: str,
@@ -415,8 +463,8 @@ Provide only the execution plan if possible, or the validation failure message:"
 
         Args:
             user_query: User's natural language query
-            execution_plan: Execution plan to follow
-            schema_context: Schema context string
+            execution_plan: Execution plan to follow (already validated)
+            schema_context: Schema context string (already validated)
             dbms_type: Database type
 
         Returns:
@@ -435,15 +483,13 @@ Database Type: {dbms_type}
 User Request: "{user_query}"
 
 CRITICAL RULES:
-1. Only use tables and columns that exist in the provided schema
-2. Follow the execution plan exactly, paying special attention to specified joins and relationships
-3. For temporal data: if requested date filtering requires joining to other tables, ensure those joins are included
-4. Return ONLY the SQL query - no explanations, no markdown, no code blocks
-5. Use proper {dbms_type} syntax
-6. Ensure all table and column names are correct per the schema
-7. When joining tables, use appropriate aliases and qualify column names to prevent ambiguity
-8. For complex queries, verify that all required joins and filters are included
-9. If the plan indicates joining tables to access temporal data, make sure the JOINs and date filters are properly implemented"""
+1. Only use tables and columns that exist in the provided schema context
+2. Follow the execution plan exactly, including all specified joins and relationships
+3. Return ONLY the SQL query - no explanations, no markdown, no code blocks
+4. Use proper {dbms_type} syntax
+5. Ensure all table and column names match those in the schema context
+6. When joining tables, use appropriate aliases and qualify column names to prevent ambiguity
+7. For complex queries, implement all required joins and filters as specified in the plan"""
 
         response = self._make_api_call([HumanMessage(content=prompt)])
         sql_query = OutputSanitizer.clean_sql(response)

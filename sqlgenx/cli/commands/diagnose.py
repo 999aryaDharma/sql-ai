@@ -9,6 +9,7 @@ from sqlgenx.core.schema_loader import SchemaLoader
 from sqlgenx.core.vector_store import VectorStore
 from sqlgenx.utils.rich_helpers import confirm
 from sqlgenx.core.schema_loader import SchemaLoader
+from sqlgenx.core.semantic_validator import DeterministicSemanticValidator
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
@@ -136,6 +137,34 @@ def diagnose_workspace(workspace: Optional[str] = None) -> None:
     
     console.print(table)
     console.print()
+
+    # ✅ NEW: Check validation system
+    console.print()
+    console.print("[bold]Validation System:[/bold]")
+    
+    semantic_profile = workspace_dir / "semantic_profile.json"
+    
+    if semantic_profile.exists():
+        print_success("Semantic profile available for deterministic validation")
+        
+        # Test validation
+        try:
+            validator = DeterministicSemanticValidator(workspace_dir)
+            
+            # Test query
+            test_query = "show me all products"
+            is_valid, reason, contexts = validator.validate(test_query)
+            
+            if is_valid:
+                print_success(f"Validation test passed ({len(contexts)} tables found)")
+            else:
+                print_warning(f"Validation test: {reason}")
+        
+        except Exception as e:
+            print_error(f"Validation system error: {str(e)}")
+    else:
+        print_warning("Semantic profile not found - using fallback validation")
+        print_info("Run: sqlgenx enrich --force")
     
     # Overall status
     all_ok = all(c["ok"] for c in checks[:5])  # Exclude optional connection check

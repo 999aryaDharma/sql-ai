@@ -342,7 +342,7 @@ class LLMSemanticEnricher:
     
     def __init__(self, api_key: str):
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             google_api_key=api_key,
             temperature=0.2,
             max_tokens=8000

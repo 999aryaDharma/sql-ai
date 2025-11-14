@@ -5,12 +5,15 @@ Replace the existing graph.py with this file.
 from typing import TypedDict, List, Dict, Any, Optional
 from pathlib import Path
 from langgraph.graph import StateGraph, END
+import os
 
 from .schema_loader import SchemaLoader, SchemaInfo
 from .vector_store import VectorStore
 from .llm_engine import LLMEngine
 from .validator import SQLValidator, ValidationResult
 from ..utils.output_sanitizer import OutputSanitizer
+from sqlgenx.core.semantic_validator import DeterministicSemanticValidator
+
 
 
 class GraphState(TypedDict):
@@ -118,33 +121,49 @@ class SQLGenerationGraph:
         return state
     
     def _validate_nl_query(self, state: GraphState) -> GraphState:
-        """Validate the user's natural language query."""
+        """
+        Validate the user's natural language query using DETERMINISTIC validation.
+        
+        NEW APPROACH:
+        - No LLM call (faster, cheaper)
+        - Uses semantic search to find relevant tables
+        - Checks capabilities against query intent
+        - Returns relevant contexts immediately (no redundant retrieval)
+        """
         if state.get("errors") or not state["schema_info"]:
             return state
         
         try:
-            llm_engine = LLMEngine(self.api_key, self.workspace_dir)
+            debug_mode = os.getenv('SQLGENX_DEBUG', '0') == '1' or state.get('debug', False)
+
+            # ✅ Use deterministic validator (no LLM)
+            validator = DeterministicSemanticValidator(state["workspace_dir"])
             
-            # Build detailed schema context
-            detailed_schema = []
-            for table in state["schema_info"].tables:
-                cols = ", ".join([f"'{c.name}' ({c.data_type})" for c in table.columns])
-                detailed_schema.append(f"Table '{table.name}': {cols}")
-            
-            schema_context = " | ".join(detailed_schema)
-            table_names = [t.name for t in state["schema_info"].tables]
-            
-            is_valid, reason = llm_engine.validate_user_query(
-                state["user_query"],
-                table_names,
-                schema_context
+            is_valid, reason, relevant_contexts = validator.validate(
+                user_query=state["user_query"],
+                n_results=7,  # Get more candidates
+                min_relevance=0.2  # Filter low-relevance results
             )
             
             if not is_valid:
                 state["errors"].append(f"Query validation failed: {reason}")
+                return state
+            
+            # ✅ Store retrieved contexts (skip redundant retrieval later)
+            state["retrieved_contexts"] = relevant_contexts
+            
+            # Add validation metadata
+            state["validation_metadata"] = {
+                'method': 'deterministic_semantic',
+                'tables_found': len(relevant_contexts),
+                'min_relevance': min([
+                    ctx.get('relevance_score', 0) 
+                    for ctx in relevant_contexts
+                ]) if relevant_contexts else 0
+            }
         
         except Exception as e:
-            state["errors"].append(f"NL validation error: {str(e)}")
+            state["errors"].append(f"Validation error: {str(e)}")
         
         return state
     
@@ -153,43 +172,56 @@ class SQLGenerationGraph:
         return "end" if state.get("errors") else "continue"
     
     def _retrieve_context(self, state: GraphState) -> GraphState:
-        """Retrieve relevant schema context."""
+        """
+        Retrieve relevant schema context.
+        
+        NEW BEHAVIOR:
+        - If contexts already retrieved during validation, skip search
+        - Otherwise, do semantic search (fallback)
+        """
         if state.get("errors"):
             return state
         
+        # ✅ Check if contexts already retrieved during validation
+        if state.get("retrieved_contexts"):
+            # Already have contexts from validation, no need to search again
+            return state
+        
+        # Fallback: Do semantic search (shouldn't happen with deterministic validation)
         try:
             vector_store = VectorStore(state["workspace_dir"])
-            contexts = vector_store.retrieve_context(state["user_query"], n_results=5)
+            
+            contexts = vector_store.retrieve_context(
+                query=state["user_query"],
+                n_results=5
+            )
+            
             state["retrieved_contexts"] = contexts
+            
         except Exception as e:
             state["errors"].append(f"Context retrieval failed: {str(e)}")
         
         return state
     
     def _create_plan(self, state: GraphState) -> GraphState:
-        """Create execution plan based on user query and schema context."""
+        """Create execution plan based on user query and schema context (using deterministic validated context)."""
         if state.get("errors"):
             return state
 
         try:
             llm_engine = LLMEngine(self.api_key, self.workspace_dir)
 
-            # Format schema context
+            # Format schema context from validated/retrieved contexts
             schema_context = "\n".join([
                 ctx.get("content", "") for ctx in state["retrieved_contexts"]
             ])
 
-            # Create execution plan (with caching support)
-            execution_plan = llm_engine.create_execution_plan(
+            # Create execution plan using the already validated context (no additional validation)
+            execution_plan = llm_engine.create_execution_plan_from_validated_context(
                 state["user_query"],
                 schema_context,
                 state.get("dbms_type", "generic")
             )
-
-            # Check if the plan indicates validation failure
-            if execution_plan.startswith("VALIDATION_FAILED:"):
-                state["errors"].append(f"Query validation failed: {execution_plan[18:].strip()}")
-                return state
 
             # Clean output (sanitizer already applied in LLM engine)
             state["execution_plan"] = execution_plan

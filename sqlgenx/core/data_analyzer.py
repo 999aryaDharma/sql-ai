@@ -61,7 +61,7 @@ class DataAnalyzer:
     def __init__(self, api_key: str):
         """Initialize enhanced data analyzer."""
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.5-flash",
             google_api_key=api_key,
             temperature=0.3,
             max_tokens=2048

@@ -35,7 +35,8 @@ def generate_sql(
     run: bool = False,
     limit: Optional[int] = None,
     analyze: bool = False,
-    fast: bool = False
+    fast: bool = False,
+    debug: bool = False
 ) -> None:
     """Generate SQL from natural language query."""
     
@@ -75,6 +76,12 @@ def generate_sql(
         console.print("  Get your API key from: [link]https://makersuite.google.com/app/apikey[/link]")
         raise typer.Exit(1)
     
+    if debug:
+        import os
+        os.environ['SQLGENX_DEBUG'] = '1'
+        console.print("[dim]🐛 Debug mode enabled[/dim]")
+        console.print()
+    
     # Generate SQL
     with Progress(
         SpinnerColumn(),
@@ -106,7 +113,19 @@ def generate_sql(
                 workspace_dir=workspace_dir,
                 user_query=query,
                 dbms_type=normalize_dialect(meta.dbms_type)
+            
             )
+
+            #✅ Show validation metadata if debug
+            if debug and result.get("validation_metadata"):
+                console.print()
+                console.print("[bold cyan]Validation Debug Info:[/bold cyan]")
+                val_meta = result["validation_metadata"]
+                console.print(f"  Method: {val_meta.get('method')}")
+                console.print(f"  Tables found: {val_meta.get('tables_found')}")
+                console.print(f"  Min relevance: {val_meta.get('min_relevance', 0):.3f}")
+                console.print(f"  Max relevance: {val_meta.get('max_relevance', 0):.3f}")
+                console.print()
             
             progress.update(task, description="✓ SQL generated successfully")
         

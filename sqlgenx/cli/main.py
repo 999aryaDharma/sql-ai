@@ -50,11 +50,12 @@ def generate(
     run: bool = typer.Option(False, "--run", "-r", help="Execute query on connected database"),
     limit: int = typer.Option(None, "--limit", "-l", help="Limit number of results"),
     analyze: bool = typer.Option(False, "--analyze", "-a", help="Analyze results with AI (requires --run)"),
-    fast: bool = typer.Option(False, "--fast", "-f", help="Skip optimization (faster)")
+    fast: bool = typer.Option(False, "--fast", "-f", help="Skip optimization (faster)"),
+    debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug mode with detailed logging")
 ) -> None:
     """Generate SQL from natural language query."""
     from sqlgenx.cli.commands.generate import generate_sql
-    generate_sql(query, workspace, explain, copy, run, limit, analyze, fast)
+    generate_sql(query, workspace, explain, copy, run, limit, analyze, fast, debug)
 
 
 @app.command()
@@ -225,6 +226,27 @@ def semantic(
     """Show semantic enrichment information for workspace."""
     from sqlgenx.cli.commands.enrich import show_semantic_info
     show_semantic_info(workspace)
+
+@app.command()
+def validate(
+    query: str = typer.Argument(..., help="Natural language query to validate"),
+    workspace: str = typer.Option(None, "--workspace", "-w", help="Workspace to use"),
+    min_relevance: float = typer.Option(0.2, "--min-relevance", help="Minimum relevance threshold"),
+    n_results: int = typer.Option(10, "--n-results", help="Number of results to retrieve")
+) -> None:
+    """
+    Validate a query and show detailed debug information.
+    
+    This command shows exactly what happens during semantic validation:
+    - Query intent extraction
+    - Semantic search results with scores
+    - Capability detection
+    - Validation decision
+    
+    Useful for debugging why queries fail validation.
+    """
+    from sqlgenx.cli.commands.validate import validate_query
+    validate_query(query, workspace, min_relevance, n_results)
 
 
 if __name__ == "__main__":
